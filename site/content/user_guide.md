@@ -820,6 +820,42 @@ Run 'kubectl help' for usage.
 Cobra can generate documentation based on subcommands, flags, etc.
 Read more about it in the [docs generation documentation](docgen/_index.md).
 
+## Exporting a command tree contract
+
+IDEs and documentation tools sometimes need to read the structure of a command
+tree without running the program. `ExportContract` exports the tree rooted at a
+command as a versioned, structured model, and `WriteContract` writes it as JSON:
+
+```go
+contract, err := rootCmd.ExportContract(&cobra.ExportOptions{
+    IncludeHidden:     true,
+    IncludeDeprecated: true,
+})
+if err != nil {
+    log.Fatal(err)
+}
+if err := rootCmd.WriteContract(os.Stdout, nil); err != nil {
+    log.Fatal(err)
+}
+```
+
+The exported model contains, for every command, its canonical path, aliases
+(which reference the canonical command without duplicating its subtree),
+argument documentation, the effective local and inherited flags with their
+types, static default values, required markers and origin (`source`,
+`defined_by`, `shadows`), and the flag groups (required-together,
+one-required, mutually-exclusive). The model version is available as
+`cobra.ContractVersion`.
+
+The export is purely static: it never invokes `Run`/`PreRun` hooks, `Args`
+validators, dynamic completion functions or flag `Value.Set`, and it does not
+modify the command tree or flag state, so repeated exports are byte-identical.
+Content that only exists dynamically at runtime is reported as `"unknown"`.
+Hidden and deprecated commands are only exported when requested via
+`ExportOptions`. Duplicate aliases, parent/child command cycles and flag
+groups referencing undefined flags are reported as errors that include the
+command path.
+
 ## Generating shell completions
 
 Cobra can generate a shell-completion file for the following shells: bash, zsh, fish, PowerShell.
