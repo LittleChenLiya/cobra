@@ -367,6 +367,110 @@ In these cases:
   - a group may contain any number of flags
 
 ### Repeated Flags
+In these cases:
+  - both local and persistent flags can be used
+    - **NOTE:** the group is only enforced on commands where every flag is defined
+  - a flag may appear in multiple groups
+  - a group may contain any number of flags
+
+### Flag Constraint Expressions
+
+When flag groups are not expressive enough, you can compose arbitrary boolean
+constraints over flag presence with `Present`, `All`, `Any`, `Not` and
+`Implies`, and register them under a rule ID with `AddFlagConstraint`.
+A leaf `Present("name")` is true when the flag was explicitly set on the
+command line (its pflag `Changed` state), so `--enabled=false` counts as
+present while a default value does not. `RuleRef("id")` reuses another
+rule's expression.
+
+```go
+rootCmd.Flags().Bool("remote", false, "Use remote mode")
+rootCmd.Flags().String("endpoint", "", "Remote endpoint address")
+rootCmd.Flags().String("file", "", "Local input file")
+
+// "remote mode requires an endpoint"
+rootCmd.AddFlagConstraint("remote-requires-endpoint",
+    cobra.Implies(cobra.Present("remote"), cobra.Present("endpoint")))
+// "remote mode and a local file cannot be combined"
+rootCmd.AddFlagConstraint("remote-file-exclusive",
+    cobra.Not(cobra.All(cobra.Present("remote"), cobra.Present("file"))))
+```
+
+In these cases:
+  - rules are resolved and validated before the command runs; rules registered
+    on parent commands also apply to subcommands
+  - flag names bind to the flags actually visible from the executed command:
+    local flags shadow inherited persistent flags of the same name
+  - referencing an unknown flag, referencing an unknown rule, circular
+    references, and empty `All`/`Any` constructs are reported as errors
+  - violations are reported with their rule ID and bound flag names, in rule
+    registration order
+  - an expression is limited to `MaxFlagConstraintSize` (32) nodes;
+    `AddFlagConstraint` rejects larger expressions
+  - shell completion only filters out flags that could never lead to a valid
+    combination; all other candidates keep their usual order
+
+#### Try it in 90 seconds
+
+Save this as `main.go` in an empty directory, then run
+`go mod init example && go mod tidy && go build -o sync .`:
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
+
+func main() {
+	root := &cobra.Command{
+		Use: "sync",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("syncing...")
+		},
+	}
+	root.Flags().Bool("remote", false, "Use remote mode")
+	root.Flags().String("endpoint", "", "Remote endpoint address")
+	root.Flags().String("file", "", "Local input file")
+	root.AddFlagConstraint("remote-requires-endpoint",
+		cobra.Implies(cobra.Present("remote"), cobra.Present("endpoint")))
+	root.AddFlagConstraint("remote-file-exclusive",
+		cobra.Not(cobra.All(cobra.Present("remote"), cobra.Present("file"))))
+	if err := root.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+```
+
+A successful run:
+
+```console
+$ ./sync --remote --endpoint https://example.com
+syncing...
+```
+
+A conflict, reported with the rule ID and the bound flag names:
+
+```console
+$ ./sync --remote --file data.txt
+Error: flag constraint violated: "remote-requires-endpoint" (flags: remote, endpoint): implies(present(remote)=true, present(endpoint)=false); "remote-file-exclusive" (flags: remote, file): not(all(present(remote)=true, present(file)=true))
+```
+
+Completion candidates after `--remote`: `--endpoint` is still offered (it can
+complete a valid combination) while `--file` is filtered out:
+
+```console
+$ ./sync __complete --remote --
+--endpoint	Remote endpoint address
+--help	help for sync
+:4
+Completion ended with directive: ShellCompDirectiveNoFileComp
+```
+
+### Repeated Flags
 
 Cobra supports two types of repeated flags, useful for implementing SSH-like verbose flags (`-v`, `-vv`, `-vvv`) or collecting multiple values.
 

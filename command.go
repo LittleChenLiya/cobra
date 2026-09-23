@@ -164,6 +164,8 @@ type Command struct {
 	iflags *flag.FlagSet
 	// parentsPflags is all persistent flags of cmd's parents.
 	parentsPflags *flag.FlagSet
+	// flagConstraints is the list of flag constraint rules registered on this command.
+	flagConstraints []flagConstraintRule
 	// globNormFunc is the global normalization function
 	// that we can use on every pflag set and children commands
 	globNormFunc func(f *flag.FlagSet, name string) flag.NormalizedName
@@ -1008,6 +1010,9 @@ func (c *Command) execute(a []string) (err error) {
 		return err
 	}
 	if err := c.ValidateFlagGroups(); err != nil {
+		return err
+	}
+	if err := c.ValidateFlagConstraints(); err != nil {
 		return err
 	}
 

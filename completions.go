@@ -444,6 +444,15 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 
 		// If we have not found any required flags, only then can we show regular flags
 		if len(completions) == 0 {
+			// Lazily resolve the flag constraint rules so that candidates which
+			// could never lead to a valid flag combination are filtered out.
+			var constraintChecker *flagConstraintChecker
+			getConstraintChecker := func() *flagConstraintChecker {
+				if constraintChecker == nil {
+					constraintChecker = newFlagConstraintChecker(finalCmd)
+				}
+				return constraintChecker
+			}
 			doCompleteFlags := func(flag *pflag.Flag) {
 				_, acceptsMultiple := flag.Value.(SliceValue)
 				acceptsMultiple = acceptsMultiple ||
@@ -454,6 +463,11 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 				if !flag.Changed || acceptsMultiple {
 					// If the flag is not already present, or if it can be specified multiple times (Array, Slice, or stringTo)
 					// we suggest it as a completion
+					if !getConstraintChecker().allows(flag) {
+						// Adding this flag would make it impossible to satisfy
+						// the registered flag constraints; don't suggest it.
+						return
+					}
 					completions = append(completions, getFlagNameCompletions(flag, toComplete)...)
 				}
 			}
