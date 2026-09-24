@@ -454,7 +454,12 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 				if !flag.Changed || acceptsMultiple {
 					// If the flag is not already present, or if it can be specified multiple times (Array, Slice, or stringTo)
 					// we suggest it as a completion
-					completions = append(completions, getFlagNameCompletions(flag, toComplete)...)
+					//
+					// Unless adding it would make it impossible to ever satisfy
+					// the registered flag constraints.
+					if finalCmd.flagConstraintSatisfiableWith(flag.Name) {
+						completions = append(completions, getFlagNameCompletions(flag, toComplete)...)
+					}
 				}
 			}
 

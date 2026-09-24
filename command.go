@@ -152,6 +152,8 @@ type Command struct {
 	args []string
 	// flagErrorBuf contains all error messages from pflag.
 	flagErrorBuf *bytes.Buffer
+	// flagConstraints contains the registered flag constraint rules, in declaration order.
+	flagConstraints []flagConstraintRule
 	// flags is full set of flags.
 	flags *flag.FlagSet
 	// pflags contains persistent flags.
@@ -1008,6 +1010,9 @@ func (c *Command) execute(a []string) (err error) {
 		return err
 	}
 	if err := c.ValidateFlagGroups(); err != nil {
+		return err
+	}
+	if err := c.ValidateFlagConstraints(); err != nil {
 		return err
 	}
 
