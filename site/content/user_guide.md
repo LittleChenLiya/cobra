@@ -695,6 +695,32 @@ It is possible to run functions before or after the main `Run` function of your 
 - `PostRun`
 - `PersistentPostRun`
 
+## AcquireResourcesE and ReleaseResourcesE Hooks
+
+Commands may optionally declare resource lifecycle hooks. When the executed
+command's chain contains `AcquireResourcesE` hooks, they are invoked after
+the `PreRun` hooks and flag validation, immediately before `RunE`, walking
+the actually executed command chain from the root down to the leaf. After
+`RunE` and the `PostRun` hooks have finished, every successfully acquired
+resource is released again in reverse (leaf-to-root) order via
+`ReleaseResourcesE`. The full hook order is therefore:
+
+- `PersistentPreRun`
+- `PreRun`
+- `AcquireResourcesE` (root to leaf)
+- `Run`
+- `PostRun`
+- `PersistentPostRun`
+- `ReleaseResourcesE` (leaf to root)
+
+If an `AcquireResourcesE` call fails midway, only the resources acquired so
+far are released and `RunE` never runs. Failures of `RunE` and of any
+`ReleaseResourcesE` are kept together in an aggregated error
+(`errors.Join`). Resources are never acquired when flag parsing fails, help
+is requested, or the version flag is printed. Each `Execute` call tracks its
+own release stack, so nested or consecutive executions never share cleanup
+state.
+
 An example of two commands which use all of these features is below.  When the subcommand is executed, it will run the root command's `PersistentPreRun` but not the root command's `PersistentPostRun`:
 
 ```go

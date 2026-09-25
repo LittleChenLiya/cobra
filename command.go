@@ -117,9 +117,11 @@ type Command struct {
 	// The *Run functions are executed in the following order:
 	//   * PersistentPreRun()
 	//   * PreRun()
+	//   * AcquireResourcesE()  (along the command chain, root first)
 	//   * Run()
 	//   * PostRun()
 	//   * PersistentPostRun()
+	//   * ReleaseResourcesE()  (along the command chain, leaf first)
 	// All functions get the same args, the arguments after the command name.
 	// The *PreRun and *PostRun functions will only be executed if the Run function of the current
 	// command has been declared.
@@ -144,6 +146,24 @@ type Command struct {
 	PersistentPostRun func(cmd *Command, args []string)
 	// PersistentPostRunE: PersistentPostRun but returns an error.
 	PersistentPostRunE func(cmd *Command, args []string) error
+
+	// AcquireResourcesE is an optional resource lifecycle hook. When set, it
+	// is invoked after the PreRun hooks and flag validation, immediately
+	// before RunE, walking the actually executed command chain from the root
+	// down to this command. If any AcquireResourcesE call fails along the
+	// way, the resources acquired so far are released again in reverse order,
+	// RunE is never executed, and the failure is returned (aggregated with
+	// any release errors via errors.Join). Resources are never acquired when
+	// flag parsing fails, help is requested, or the version flag is printed.
+	AcquireResourcesE func(cmd *Command, args []string) error
+	// ReleaseResourcesE is the counterpart of AcquireResourcesE. After RunE
+	// and the PostRun hooks have finished, every command whose
+	// AcquireResourcesE call succeeded has its ReleaseResourcesE hook invoked
+	// in reverse (leaf-to-root) order. Release failures are aggregated with
+	// the RunE error via errors.Join, so no failure is silently dropped.
+	// Each Execute call keeps its own release stack; nested or consecutive
+	// executions never share cleanup state.
+	ReleaseResourcesE func(cmd *Command, args []string) error
 
 	// groups for subcommands
 	commandgroups []*Group
@@ -1011,6 +1031,29 @@ func (c *Command) execute(a []string) (err error) {
 		return err
 	}
 
+	// Acquire resources along the actually executed command chain, from the
+	// root down to this command. The release stack is kept in a local
+	// variable so that every Execute call (including nested ones) tracks its
+	// own cleanup state independently.
+	var acquired []*Command
+	defer func() {
+		err = releaseResources(c, acquired, argWoFlags, err)
+	}()
+	chain := make([]*Command, 0, 5)
+	for p := c; p != nil; p = p.Parent() {
+		chain = append([]*Command{p}, chain...)
+	}
+	for _, p := range chain {
+		if p.AcquireResourcesE == nil {
+			continue
+		}
+		if acquireErr := p.AcquireResourcesE(c, argWoFlags); acquireErr != nil {
+			// The deferred release above frees whatever was acquired so far.
+			return acquireErr
+		}
+		acquired = append(acquired, p)
+	}
+
 	if c.RunE != nil {
 		if err := c.RunE(c, argWoFlags); err != nil {
 			return err
@@ -1042,6 +1085,29 @@ func (c *Command) execute(a []string) (err error) {
 	}
 
 	return nil
+}
+
+// releaseResources releases, in reverse acquisition order, every resource
+// acquired along the command chain and aggregates any release failures with
+// the run error, so that no failure is silently dropped.
+func releaseResources(c *Command, acquired []*Command, args []string, runErr error) error {
+	if len(acquired) == 0 {
+		return runErr
+	}
+	releaseErrs := make([]error, 0, len(acquired))
+	for i := len(acquired) - 1; i >= 0; i-- {
+		p := acquired[i]
+		if p.ReleaseResourcesE == nil {
+			continue
+		}
+		if releaseErr := p.ReleaseResourcesE(c, args); releaseErr != nil {
+			releaseErrs = append(releaseErrs, releaseErr)
+		}
+	}
+	if len(releaseErrs) == 0 {
+		return runErr
+	}
+	return errors.Join(append([]error{runErr}, releaseErrs...)...)
 }
 
 func (c *Command) preRun() {
