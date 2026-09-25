@@ -117,7 +117,9 @@ type Command struct {
 	// The *Run functions are executed in the following order:
 	//   * PersistentPreRun()
 	//   * PreRun()
+	//   * AcquireResourceE() (from the root command down to the executed one)
 	//   * Run()
+	//   * ReleaseResourceE() (from the executed command up to the root)
 	//   * PostRun()
 	//   * PersistentPostRun()
 	// All functions get the same args, the arguments after the command name.
@@ -144,6 +146,34 @@ type Command struct {
 	PersistentPostRun func(cmd *Command, args []string)
 	// PersistentPostRunE: PersistentPostRun but returns an error.
 	PersistentPostRunE func(cmd *Command, args []string) error
+
+	// AcquireResourceE is an optional resource lifecycle hook. When the command
+	// is executed, the AcquireResourceE hooks of the executed command and all
+	// of its parents run in order from the root command down to the executed
+	// command, after flag and argument validation and after the *PreRun hooks,
+	// right before Run/RunE. Unlike the *PreRun hooks, AcquireResourceE
+	// receives the command that defines the hook, not the executed command.
+	//
+	// If any AcquireResourceE hook fails, the ReleaseResourceE hooks of the
+	// commands already acquired run in reverse order, the remaining
+	// AcquireResourceE hooks and the Run function are skipped, and the
+	// aggregated error is returned.
+	//
+	// Resources are never acquired when flag parsing fails, when argument
+	// validation fails, or when help or version output is requested.
+	//
+	// The acquired state is kept per execution: nested or consecutive Execute
+	// calls never share a cleanup stack.
+	AcquireResourceE func(cmd *Command, args []string) error
+	// ReleaseResourceE is an optional resource lifecycle hook paired with
+	// AcquireResourceE. After Run/RunE finishes, the ReleaseResourceE hooks of
+	// all successfully acquired commands run in reverse order, from the
+	// executed command up to the root, before the *PostRun hooks. Release
+	// hooks run even when Run/RunE fails; Run and Release failures are
+	// aggregated into a single error which can be inspected with errors.Is
+	// and errors.As. Like AcquireResourceE, ReleaseResourceE receives the
+	// command that defines the hook.
+	ReleaseResourceE func(cmd *Command, args []string) error
 
 	// groups for subcommands
 	commandgroups []*Group
@@ -1011,13 +1041,37 @@ func (c *Command) execute(a []string) (err error) {
 		return err
 	}
 
-	if c.RunE != nil {
-		if err := c.RunE(c, argWoFlags); err != nil {
+	// Acquire resources along the executed command chain, from the root
+	// command down to this command. The acquired stack is a local variable
+	// so that every execution, including nested and consecutive Execute
+	// calls, owns an independent cleanup stack.
+	// The help command, like the help and version flag paths, only prints
+	// output and never acquires resources.
+	var acquired []*Command
+	if c != c.Root().helpCommand {
+		acquired, err = c.acquireResources(argWoFlags)
+		if err != nil {
 			return err
 		}
+	}
+
+	var runErr error
+	if c.RunE != nil {
+		runErr = c.RunE(c, argWoFlags)
 	} else {
 		c.Run(c, argWoFlags)
 	}
+
+	// Release the acquired resources in reverse order, even when the Run
+	// function failed, and aggregate any Run and Release failures into a
+	// single error.
+	if err := releaseResources(acquired, argWoFlags); err != nil {
+		runErr = appendError(runErr, err)
+	}
+	if runErr != nil {
+		return runErr
+	}
+
 	if c.PostRunE != nil {
 		if err := c.PostRunE(c, argWoFlags); err != nil {
 			return err
@@ -1042,6 +1096,88 @@ func (c *Command) execute(a []string) (err error) {
 	}
 
 	return nil
+}
+
+// acquireResources runs the AcquireResourceE hooks of the executed command
+// chain, from the root command down to c. It returns the commands whose
+// hooks ran successfully, in acquisition order. If a hook fails, the
+// resources acquired so far are released in reverse order and the
+// aggregated error is returned.
+func (c *Command) acquireResources(args []string) ([]*Command, error) {
+	chain := make([]*Command, 0, 5)
+	for p := c; p != nil; p = p.Parent() {
+		chain = append(chain, p)
+	}
+	acquired := make([]*Command, 0, len(chain))
+	for i := len(chain) - 1; i >= 0; i-- {
+		p := chain[i]
+		if p.AcquireResourceE == nil {
+			continue
+		}
+		if err := p.AcquireResourceE(p, args); err != nil {
+			return acquired, appendError(err, releaseResources(acquired, args))
+		}
+		acquired = append(acquired, p)
+	}
+	return acquired, nil
+}
+
+// releaseResources runs the ReleaseResourceE hooks of the acquired commands
+// in reverse acquisition order and aggregates all failures.
+func releaseResources(acquired []*Command, args []string) error {
+	var errs []error
+	for i := len(acquired) - 1; i >= 0; i-- {
+		p := acquired[i]
+		if p.ReleaseResourceE == nil {
+			continue
+		}
+		if err := p.ReleaseResourceE(p, args); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return joinErrors(errs)
+}
+
+// appendError aggregates err with extra, keeping both inspectable through
+// errors.Is and errors.As.
+func appendError(err, extra error) error {
+	return joinErrors([]error{err, extra})
+}
+
+// joinErrors aggregates the non-nil errors into a single error. It returns
+// nil when every error is nil, and the error itself when there is only one.
+func joinErrors(errs []error) error {
+	filtered := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			filtered = append(filtered, err)
+		}
+	}
+	switch len(filtered) {
+	case 0:
+		return nil
+	case 1:
+		return filtered[0]
+	default:
+		return multiError(filtered)
+	}
+}
+
+// multiError aggregates multiple errors into one. It predates errors.Join,
+// which is unavailable with the Go version targeted by this module.
+type multiError []error
+
+func (e multiError) Error() string {
+	msgs := make([]string, 0, len(e))
+	for _, err := range e {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "\n")
+}
+
+// Unwrap returns the underlying errors, for use with errors.Is and errors.As.
+func (e multiError) Unwrap() []error {
+	return []error(e)
 }
 
 func (c *Command) preRun() {

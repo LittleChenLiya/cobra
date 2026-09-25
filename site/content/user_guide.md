@@ -774,6 +774,43 @@ By default, only the first persistent hook found in the command chain is execute
 That is why in the above output, the `rootCmd PersistentPostRun` was not called for a child command.
 Set `EnableTraverseRunHooks` global variable to `true` if you want to execute all parents' persistent hooks.
 
+## Resource Lifecycle Hooks
+
+Commands may optionally define `AcquireResourceE` and `ReleaseResourceE` hooks to manage
+resources (connections, locks, temporary files, ...) along the executed command chain.
+When a command is executed, the `AcquireResourceE` hooks of the executed command and all
+of its parents run in order from the root command down to the executed command. After
+`Run` finishes, the `ReleaseResourceE` hooks of all successfully acquired commands run in
+the exact reverse order. Unlike the `*PreRun`/`*PostRun` hooks, the resource hooks receive
+the command that defines the hook, not the final executed command.
+
+The full hook order, including the existing hooks, is:
+
+- `PersistentPreRun`
+- `PreRun`
+- `AcquireResourceE` (root command down to the executed command)
+- `Run`
+- `ReleaseResourceE` (executed command up to the root command)
+- `PostRun`
+- `PersistentPostRun`
+
+The semantics in more detail:
+
+- If an `AcquireResourceE` hook fails, only the resources already acquired are released
+  (in reverse order); the remaining acquire hooks and `Run` are skipped.
+- Release hooks run even when `Run` fails. `Run` and `Release` failures are aggregated
+  into a single error which can be inspected with `errors.Is`/`errors.As`.
+- Resources are never acquired when flag parsing or argument validation fails, or when
+  help or version output is requested (including the `help` command).
+- The acquired state is kept per execution: nested or consecutive `Execute` calls never
+  share a cleanup stack.
+
+For example, given a root/group/leaf command chain acquiring resources `R`, `G` and `L`,
+a successful execution logs `acquire R, acquire G, acquire L, run, release L, release G,
+release R`. If acquiring `G` fails, only `R` is released. See
+`ExampleCommand_resourceLifecycle` in `resource_hooks_test.go` for a runnable demo
+(`go test -run ExampleCommand_resourceLifecycle -v`).
+
 ## Suggestions when "unknown command" happens
 
 Cobra will print automatic suggestions when "unknown command" errors happen. This allows Cobra to behave similarly to the `git` command when a typo happens. For example:
