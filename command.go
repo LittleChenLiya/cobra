@@ -217,6 +217,10 @@ type Command struct {
 
 	ctx context.Context
 
+	// aliasMigrations maps deprecated full command paths to the current
+	// canonical full command paths they should be redirected to.
+	aliasMigrations map[string]string
+
 	// commands is the list of commands supported by this program.
 	commands []*Command
 	// parent is a parent command for this command.
@@ -1104,6 +1108,21 @@ func (c *Command) ExecuteC() (cmd *Command, err error) {
 	// Workaround FAIL with "go test -v" or "cobra.test -test.v", see #155
 	if c.args == nil && filepath.Base(os.Args[0]) != "cobra.test" {
 		args = os.Args[1:]
+	}
+
+	// Rewrite deprecated command paths (alias migrations) before any command
+	// lookup or flag parsing takes place, so the target command receives the
+	// remaining arguments verbatim.
+	if len(args) > 0 {
+		migratedArgs, migratedFrom, migratedTo, err := c.applyAliasMigration(args)
+		if err != nil {
+			c.PrintErrln(c.ErrPrefix(), err.Error())
+			return c, err
+		}
+		if migratedFrom != "" {
+			c.Printf("Command %q is deprecated, please use %q instead.\n", migratedFrom, migratedTo)
+			args = migratedArgs
+		}
 	}
 
 	// initialize the __complete command to be used for shell completion

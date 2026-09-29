@@ -815,6 +815,38 @@ Did you mean this?
 Run 'kubectl help' for usage.
 ```
 
+## Migrating deprecated command paths
+
+When you rename a command (or move it to a different place in the command
+hierarchy) you can keep the old path working for a while while telling users
+about the new path. Set an explicit alias migration table on the root command
+with `SetAliasMigration`; keys are the deprecated full command paths and
+values are the current canonical full command paths:
+
+```go
+rootCmd.SetAliasMigration(map[string]string{
+	"old sync": "project pull",
+})
+```
+
+Now `mycli old sync --message "hello world" -- --after-dash` behaves exactly
+like `mycli project pull --message "hello world" -- --after-dash`; the target
+command receives the remaining arguments, including arguments with spaces and
+everything after `--`, untouched. A single notice is printed telling the user
+which new command path to use:
+
+```console
+$ mycli old sync
+Command "old sync" is deprecated, please use "project pull" instead.
+```
+
+Migrations are matched on the complete command hierarchy, and mappings may be
+chained (`a b` -> `c d` -> `e f`); the notice is printed only once and points
+at the final path. Real subcommands (including their aliases) always take
+precedence over a migration, so a mapping whose first token is an existing
+subcommand is ignored. Cycles and targets that do not resolve to a real
+command are reported as errors.
+
 ## Generating documentation for your command
 
 Cobra can generate documentation based on subcommands, flags, etc.
