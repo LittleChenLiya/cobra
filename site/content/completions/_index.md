@@ -335,6 +335,40 @@ cmd.RegisterFlagCompletionFunc("flag-name", cobra.FixedCompletions(nil, ShellCom
 
 To change the default directive for the entire program, set the DefaultShellCompDirective on the root command.
 
+#### Context-aware completion with timeout and caching
+
+For flag completion functions that may be slow (for example, ones that query a remote API),
+you can use `command.RegisterFlagCompletionFuncWithContext()` instead of
+`command.RegisterFlagCompletionFunc()`. The registered function receives a `context.Context`
+and reports errors explicitly:
+
+```go
+cmd.RegisterFlagCompletionFuncWithContext("namespace",
+	func(ctx context.Context, cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective, error) {
+		namespaces, err := fetchNamespaces(ctx)
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveError, err
+		}
+		return namespaces, cobra.ShellCompDirectiveNoFileComp, nil
+	},
+	cobra.WithCompletionTimeout(500*time.Millisecond),
+	cobra.WithCompletionCache(32, time.Minute, "v1"),
+)
+```
+
+The following options are available:
+
+- `WithCompletionTimeout(d)` bounds how long a single completion callback may run. When the
+  timeout elapses, the completion request fails with `ShellCompDirectiveError`; the late result
+  of the callback is discarded and never cached, and it does not block the next completion request.
+  Cancellation of the command's context behaves the same way.
+- `WithCompletionCache(capacity, ttl, version)` enables an LRU cache of successful completion
+  results. The cache key combines the command path, the values of the flags already set on the
+  command, the word being completed, and the provided `version` string; bump the version to
+  invalidate previously cached entries. Only successful (nil error) results are cached.
+- `WithCompletionClock(clock)` overrides the clock used for cache expiration, which is mostly
+  useful in tests.
+
 #### Debugging
 
 You can also easily debug your Go completion code for flags:
