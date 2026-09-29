@@ -66,6 +66,15 @@ type Command struct {
 	// Aliases is an array of aliases that can be used instead of the first word in Use.
 	Aliases []string
 
+	// AliasMigration maps deprecated command paths to the canonical command path
+	// that replaced them. Both keys and values are space-separated command paths
+	// relative to the command the map is defined on, for example
+	// "old sync" -> "project pull". When a user invokes a migrated path, the
+	// remaining arguments are forwarded unchanged to the target command and a
+	// notice pointing at the new path is printed exactly once. Real subcommands
+	// always take precedence over a migration entry.
+	AliasMigration map[string]string
+
 	// SuggestFor is an array of command names for which this command will be suggested -
 	// similar to aliases but only suggests.
 	SuggestFor []string
@@ -859,6 +868,139 @@ func (c *Command) Traverse(args []string) (*Command, []string, error) {
 	return c, args, nil
 }
 
+// commandPathExists reports whether words identify a real command below c.
+// Aliases and prefix matching are resolved the same way as during Find.
+func (c *Command) commandPathExists(words []string) bool {
+	cmd := c
+	for _, word := range words {
+		next := cmd.findNext(word)
+		if next == nil {
+			return false
+		}
+		cmd = next
+	}
+	return true
+}
+
+// leadingCommandPositions returns the words and the positions of the leading
+// non-flag tokens of args, stopping after n command words or at `--`. Flag
+// values are skipped the same way stripFlags does, so flags may be interleaved
+// with the command words. ok is true when exactly n command words were found.
+func (c *Command) leadingCommandPositions(args []string, n int) (words []string, positions []int, ok bool) {
+	c.mergePersistentFlags()
+	flags := c.Flags()
+	for pos := 0; pos < len(args) && len(words) < n; pos++ {
+		s := args[pos]
+		switch {
+		case s == "--":
+			return words, positions, false
+		case strings.HasPrefix(s, "--") && !strings.Contains(s, "=") && !hasNoOptDefVal(s[2:], flags):
+			// Long flag with a space-separated value; skip the value too.
+			pos++
+		case strings.HasPrefix(s, "-") && !strings.Contains(s, "=") && len(s) == 2 && !shortHasNoOptDefVal(s[1:], flags):
+			// Short flag with a space-separated value; skip the value too.
+			pos++
+		case s != "" && !strings.HasPrefix(s, "-"):
+			words = append(words, s)
+			positions = append(positions, pos)
+		}
+	}
+	return words, positions, len(words) == n
+}
+
+// rewriteCommandPrefix replaces the command words at positions with the given
+// replacement words. Every other argument, including flags, their values and
+// anything following `--`, is left untouched and in its original position.
+func rewriteCommandPrefix(args []string, positions []int, replacement []string) []string {
+	rewritten := make([]string, 0, len(args)-len(positions)+len(replacement))
+	matched := 0
+	for pos, arg := range args {
+		if matched < len(positions) && pos == positions[matched] {
+			if matched == 0 {
+				rewritten = append(rewritten, replacement...)
+			}
+			matched++
+			continue
+		}
+		rewritten = append(rewritten, arg)
+	}
+	return rewritten
+}
+
+// resolveAliasMigration matches the full command hierarchy of args against the
+// AliasMigration table. When a deprecated path matches, the leading command
+// words are rewritten to the canonical command path while every remaining
+// argument is forwarded verbatim. Migration chains are followed until a real
+// command is reached; cycles and targets that do not resolve to a command are
+// reported as errors. A real subcommand always takes precedence over a
+// migration entry. When a migration is applied, deprecatedPath and
+// canonicalPath hold the path the user typed and the resolved target path.
+func (c *Command) resolveAliasMigration(args []string) (rewritten []string, deprecatedPath, canonicalPath string, err error) {
+	if len(c.AliasMigration) == 0 {
+		return args, "", "", nil
+	}
+
+	// Longer paths take precedence so that a more specific migration is not
+	// shadowed by a shorter one sharing the same prefix.
+	keys := make([]string, 0, len(c.AliasMigration))
+	for key := range c.AliasMigration {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return len(strings.Fields(keys[i])) > len(strings.Fields(keys[j]))
+	})
+
+	for _, deprecatedPath = range keys {
+		oldWords := strings.Fields(deprecatedPath)
+		words, positions, ok := c.leadingCommandPositions(args, len(oldWords))
+		if !ok || !equalStringSlices(words, oldWords) {
+			continue
+		}
+
+		// A real subcommand colliding with the migrated path always wins; let
+		// the normal resolution take over instead of redirecting.
+		if c.commandPathExists(oldWords[:1]) {
+			return args, "", "", nil
+		}
+
+		originalPath := deprecatedPath
+		seen := map[string]struct{}{deprecatedPath: {}}
+		for {
+			targetPath, ok := c.AliasMigration[deprecatedPath]
+			if !ok || strings.TrimSpace(targetPath) == "" {
+				return nil, "", "", fmt.Errorf("alias migration %q has no target command", originalPath)
+			}
+
+			targetWords := strings.Fields(targetPath)
+			if _, repeated := seen[targetPath]; repeated {
+				return nil, "", "", fmt.Errorf("alias migration cycle detected for %q", originalPath)
+			}
+			seen[targetPath] = struct{}{}
+
+			// Stop as soon as the chain reaches a real command.
+			if c.commandPathExists(targetWords) {
+				return rewriteCommandPrefix(args, positions, targetWords), originalPath, targetPath, nil
+			}
+
+			deprecatedPath = targetPath
+		}
+	}
+
+	return args, "", "", nil
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // SuggestionsFor provides suggestions for the typedName.
 func (c *Command) SuggestionsFor(typedName string) []string {
 	suggestions := []string{}
@@ -1115,6 +1257,20 @@ func (c *Command) ExecuteC() (cmd *Command, err error) {
 	// Now that all commands have been created, let's make sure all groups
 	// are properly created also
 	c.checkCommandGroups()
+
+	// Resolve explicit deprecated command-path aliases before normal command
+	// matching. The full command hierarchy is matched and all remaining args are
+	// forwarded verbatim to the canonical command.
+	args, deprecatedPath, canonicalPath, err := c.resolveAliasMigration(args)
+	if err != nil {
+		if !c.SilenceErrors {
+			c.PrintErrln(c.ErrPrefix(), err.Error())
+		}
+		return c, err
+	}
+	if deprecatedPath != "" {
+		c.Printf("Command %q is deprecated, please use %q instead\n", deprecatedPath, canonicalPath)
+	}
 
 	var flags []string
 	if c.TraverseChildren {
