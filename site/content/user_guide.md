@@ -815,6 +815,26 @@ Did you mean this?
 Run 'kubectl help' for usage.
 ```
 
+## Checking for alias conflicts statically
+
+When a command tree is assembled from multiple packages, names,
+`Aliases` and `SuggestFor` entries can collide silently. Call
+`CheckAliasConflicts` (or `root.CheckAliasConflicts()`) once after
+registration to get every collision in a single deterministic report,
+without executing any command:
+
+```go
+if conflicts := cobra.CheckAliasConflicts(rootCmd); len(conflicts) > 0 {
+    fmt.Fprintln(os.Stderr, cobra.AliasConflictReport(conflicts))
+    os.Exit(1)
+}
+```
+
+The check is scoped per parent command (same token under different
+parents is fine), includes hidden commands, never calls `Find` and never
+modifies the command tree. Read more in the
+[alias checking documentation](alias_checking.md).
+
 ## Generating documentation for your command
 
 Cobra can generate documentation based on subcommands, flags, etc.
