@@ -815,6 +815,53 @@ Did you mean this?
 Run 'kubectl help' for usage.
 ```
 
+## Checking for alias conflicts
+
+When a command tree is assembled from several packages (for example a
+plugin-style CLI where each package registers its own subcommands), two
+commands can end up claiming the same name or alias under the same parent.
+Such conflicts usually only surface at runtime when a command cannot be
+found. The `CheckAliases` method performs a static, read-only check of the
+whole command tree and reports every conflict in one go, without executing
+any command:
+
+```go
+conflicts := rootCmd.CheckAliases()
+for _, conflict := range conflicts {
+    fmt.Println(conflict)
+}
+```
+
+For each parent command, `CheckAliases` considers the real name of every
+child, its `Aliases`, and its `SuggestFor` entries. A conflict is reported
+when:
+
+- two different commands declare the same token under the same parent
+  (for example one command has alias `s` and another is named `s`);
+- the same command declares the same token twice (for example `Aliases`
+  containing a duplicate entry, or an alias equal to the command's own
+  name).
+
+Tokens that only collide across different parent branches are not
+conflicts, and hidden commands participate in the check. Conflicts are
+returned in registration order: for each parent command, children are
+considered in the order they were added, and parent scopes are checked
+depth-first before their children.
+
+The check never calls `Find`, so it does not trigger argument parsing, and
+it never modifies the command tree. A conflict report includes the full
+paths of both commands involved and the conflict type:
+
+```console
+root: alias "s" of "root sync" conflicts with name "s" of "root s"
+```
+
+To run the alias checker's targeted tests:
+
+```console
+go test -run 'TestAliasChecker' -v .
+```
+
 ## Generating documentation for your command
 
 Cobra can generate documentation based on subcommands, flags, etc.
