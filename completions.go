@@ -239,6 +239,9 @@ func (c *Command) initCompleteCmd(args []string) {
 		Short:                 "Request shell completion choices for the specified command-line",
 		Long: fmt.Sprintf("%[2]s is a special command that is used by the shell completion logic\n%[1]s",
 			"to request completion choices for the specified command-line.", ShellCompRequestCmd),
+		// Completion requests are read-only and must never trigger the
+		// permission layer.
+		Annotations: map[string]string{PermissionsSkipAnnotation: "true"},
 		Run: func(cmd *Command, args []string) {
 			finalCmd, completions, directive, err := cmd.getCompletions(args)
 			if err != nil {
@@ -779,6 +782,9 @@ See each sub-command's help for details on how to use the generated script.
 		ValidArgsFunction: NoFileCompletions,
 		Hidden:            c.CompletionOptions.HiddenDefaultCmd,
 		GroupID:           c.completionCommandGroupID,
+		// Generating a completion script is a read-only action and must never
+		// trigger the permission layer.
+		Annotations: map[string]string{PermissionsSkipAnnotation: "true"},
 	}
 	c.AddCommand(completionCmd)
 
@@ -924,6 +930,15 @@ to your powershell profile.
 	}
 	if haveNoDescFlag {
 		powershell.Flags().BoolVar(&noDesc, compCmdNoDescFlagName, compCmdNoDescFlagDefault, compCmdNoDescFlagDesc)
+	}
+
+	// Generating a completion script is a read-only action and must never
+	// trigger the permission layer.
+	for _, sub := range []*Command{bash, zsh, fish, powershell} {
+		if sub.Annotations == nil {
+			sub.Annotations = map[string]string{}
+		}
+		sub.Annotations[PermissionsSkipAnnotation] = "true"
 	}
 
 	completionCmd.AddCommand(bash, zsh, fish, powershell)

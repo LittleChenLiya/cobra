@@ -108,6 +108,14 @@ type Command struct {
 	// group commands or set special options.
 	Annotations map[string]string
 
+	// PermissionChecker is the application's gate for command execution. When
+	// set on the root command, every executed command is checked against the
+	// effective permission plan (see PermissionPlan) before any PreRun or Run
+	// callback runs. Commands annotated with PermissionsSkipAnnotation (the
+	// built-in help and completion commands) are exempt. A nil checker
+	// disables the permission layer entirely.
+	PermissionChecker PermissionChecker
+
 	// Version defines the version for this command. If this value is non-empty and the command does not
 	// define a "version" flag, a "version" boolean flag will be added to the command and, if specified,
 	// will print content of the "Version" variable. A shorthand "v" flag will also be added if the
@@ -956,6 +964,14 @@ func (c *Command) execute(a []string) (err error) {
 		return flag.ErrHelp
 	}
 
+	// Run the permission layer before any business callback (PreRun/Run) and
+	// before the initializers. Read-only commands such as help and completion
+	// are marked with PermissionsSkipAnnotation and skip this check. When the
+	// plan fails, only the names of the missing permissions are reported.
+	if err := c.checkPermissions(); err != nil {
+		return err
+	}
+
 	c.preRun()
 
 	defer c.postRun()
@@ -981,18 +997,26 @@ func (c *Command) execute(a []string) (err error) {
 			parents = append(parents, p)
 		}
 	}
-	for _, p := range parents {
-		if p.PersistentPreRunE != nil {
-			if err := p.PersistentPreRunE(c, argWoFlags); err != nil {
-				return err
-			}
-			if !EnableTraverseRunHooks {
-				break
-			}
-		} else if p.PersistentPreRun != nil {
-			p.PersistentPreRun(c, argWoFlags)
-			if !EnableTraverseRunHooks {
-				break
+	// Read-only commands (help, completion and anything marked with
+	// PermissionsSkipAnnotation) must not trigger inherited business
+	// callbacks, so persistent hooks from ancestors are skipped. The
+	// command's own PreRun/Run/PostRun still execute (they are the
+	// read-only display itself).
+	skipInheritedHooks := c.skipsPermissionChecks()
+	if !skipInheritedHooks {
+		for _, p := range parents {
+			if p.PersistentPreRunE != nil {
+				if err := p.PersistentPreRunE(c, argWoFlags); err != nil {
+					return err
+				}
+				if !EnableTraverseRunHooks {
+					break
+				}
+			} else if p.PersistentPreRun != nil {
+				p.PersistentPreRun(c, argWoFlags)
+				if !EnableTraverseRunHooks {
+					break
+				}
 			}
 		}
 	}
@@ -1025,18 +1049,20 @@ func (c *Command) execute(a []string) (err error) {
 	} else if c.PostRun != nil {
 		c.PostRun(c, argWoFlags)
 	}
-	for p := c; p != nil; p = p.Parent() {
-		if p.PersistentPostRunE != nil {
-			if err := p.PersistentPostRunE(c, argWoFlags); err != nil {
-				return err
-			}
-			if !EnableTraverseRunHooks {
-				break
-			}
-		} else if p.PersistentPostRun != nil {
-			p.PersistentPostRun(c, argWoFlags)
-			if !EnableTraverseRunHooks {
-				break
+	if !skipInheritedHooks {
+		for p := c; p != nil; p = p.Parent() {
+			if p.PersistentPostRunE != nil {
+				if err := p.PersistentPostRunE(c, argWoFlags); err != nil {
+					return err
+				}
+				if !EnableTraverseRunHooks {
+					break
+				}
+			} else if p.PersistentPostRun != nil {
+				p.PersistentPostRun(c, argWoFlags)
+				if !EnableTraverseRunHooks {
+					break
+				}
 			}
 		}
 	}
@@ -1309,6 +1335,12 @@ Simply type ` + c.DisplayName() + ` help [path to command] for full details.`,
 			GroupID: c.helpCommandGroupID,
 		}
 	}
+	// The help command is a read-only entry point and must never trigger the
+	// permission layer (it displays help for commands without executing them).
+	if c.helpCommand.Annotations == nil {
+		c.helpCommand.Annotations = map[string]string{}
+	}
+	c.helpCommand.Annotations[PermissionsSkipAnnotation] = "true"
 	c.RemoveCommand(c.helpCommand)
 	c.AddCommand(c.helpCommand)
 }
