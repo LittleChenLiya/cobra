@@ -194,6 +194,11 @@ type Command struct {
 	// errPrefix is the error message prefix defined by user.
 	errPrefix string
 
+	// permissionCheckerFn is the optional checker that approves the effective
+	// permission plan (declared via PermissionRequiredAnnotation) before any
+	// business run hook is executed. It is inherited by child commands.
+	permissionCheckerFn PermissionChecker
+
 	// inReader is a reader defined by the user that replaces stdin
 	inReader io.Reader
 	// outWriter is a writer defined by the user that replaces stdout
@@ -956,6 +961,16 @@ func (c *Command) execute(a []string) (err error) {
 		return flag.ErrHelp
 	}
 
+	// Enforce the explicit permission plan declared through command
+	// annotations before any business hook runs: this is ahead of
+	// PersistentPreRun (including inherited ones from parent commands),
+	// PreRun and Run. The --help/--version flags and non-runnable commands
+	// have already returned above, and read-only display commands marked with
+	// PermissionExemptAnnotation are skipped without invoking the checker.
+	if err := c.checkPermissions(); err != nil {
+		return err
+	}
+
 	c.preRun()
 
 	defer c.postRun()
@@ -982,6 +997,13 @@ func (c *Command) execute(a []string) (err error) {
 		}
 	}
 	for _, p := range parents {
+		// The read-only help path must not trigger any business callback,
+		// including persistent pre-run hooks inherited from ancestors. Shell
+		// completion is intentionally NOT suppressed here: it stays
+		// permission-exempt while preserving PersistentPreRun compatibility.
+		if c.businessHooksSuppressed() {
+			break
+		}
 		if p.PersistentPreRunE != nil {
 			if err := p.PersistentPreRunE(c, argWoFlags); err != nil {
 				return err
@@ -1026,6 +1048,11 @@ func (c *Command) execute(a []string) (err error) {
 		c.PostRun(c, argWoFlags)
 	}
 	for p := c; p != nil; p = p.Parent() {
+		// Mirror the pre-run behavior: the read-only help path never executes
+		// inherited business persistent post-run hooks.
+		if c.businessHooksSuppressed() {
+			break
+		}
 		if p.PersistentPostRunE != nil {
 			if err := p.PersistentPostRunE(c, argWoFlags); err != nil {
 				return err
@@ -1309,6 +1336,9 @@ Simply type ` + c.DisplayName() + ` help [path to command] for full details.`,
 			GroupID: c.helpCommandGroupID,
 		}
 	}
+	// The help path is read-only: never run the permission checker nor any
+	// business (persistent) run hook inherited from the root.
+	c.helpCommand.suppressBusinessHooks()
 	c.RemoveCommand(c.helpCommand)
 	c.AddCommand(c.helpCommand)
 }

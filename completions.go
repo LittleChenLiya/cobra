@@ -236,7 +236,13 @@ func (c *Command) initCompleteCmd(args []string) {
 		Hidden:                true,
 		DisableFlagParsing:    true,
 		Args:                  MinimumNArgs(1),
-		Short:                 "Request shell completion choices for the specified command-line",
+		// Shell completion is a read-only display path: it must never trigger
+		// a business permission action, neither through this command nor
+		// through its __completeNoDesc alias (they share one identity).
+		Annotations: map[string]string{
+			PermissionExemptAnnotation: "true",
+		},
+		Short: "Request shell completion choices for the specified command-line",
 		Long: fmt.Sprintf("%[2]s is a special command that is used by the shell completion logic\n%[1]s",
 			"to request completion choices for the specified command-line.", ShellCompRequestCmd),
 		Run: func(cmd *Command, args []string) {
@@ -927,6 +933,13 @@ to your powershell profile.
 	}
 
 	completionCmd.AddCommand(bash, zsh, fish, powershell)
+
+	// Generating shell completion scripts is a read-only display path and must
+	// not invoke the business permission checker, neither for the completion
+	// command nor for its shell sub-commands.
+	for _, cmd := range append([]*Command{completionCmd}, bash, zsh, fish, powershell) {
+		cmd.markPermissionExempt()
+	}
 }
 
 func findFlag(cmd *Command, name string) *pflag.Flag {

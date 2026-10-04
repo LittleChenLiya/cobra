@@ -885,3 +885,52 @@ Flags:
 
 Use "kubectl myplugin [command] --help" for more information about a command.
 ```
+
+## Permissions
+
+Cobra supports an explicit permission layer declared through command
+annotations. Before any business hook (`PersistentPreRun`, `PreRun` or `Run`)
+is executed, Cobra computes the effective permission plan of the target
+command by collecting requirements from the root of the command tree down to
+the target. Parent requirements are inherited: a child command can only add
+permissions and can never remove a requirement introduced by a parent.
+
+Aliases resolve to the same command as the canonical name, so invoking a
+command through one of its aliases produces the exact same plan.
+
+Requirements are declared with the
+`cobra.PermissionRequiredAnnotation` annotation, whose value is a comma
+separated list of permission names. A `cobra.PermissionChecker` registered on
+the root command (via `SetPermissionChecker`) authorizes the plan. On denial
+Cobra returns a `*cobra.PermissionDeniedError` that only names the missing
+permissions — it never exposes the caller's full permission set.
+
+```go
+root := &cobra.Command{
+    Use:         "app",
+    Annotations: map[string]string{cobra.PermissionRequiredAnnotation: "read"},
+}
+push := &cobra.Command{
+    Use:         "push",
+    Aliases:     []string{"publish"},
+    Annotations: map[string]string{cobra.PermissionRequiredAnnotation: "write"},
+    Run:         func(*cobra.Command, []string) { /* business logic */ },
+}
+root.AddCommand(push)
+
+// granted would normally be derived from your auth/session layer.
+root.SetPermissionChecker(cobra.NewStaticPermissionChecker(granted...))
+```
+
+With this setup `app push` (and its alias `app publish`) require both `read`
+and `write`; a caller holding only `read` is rejected before any run hook
+executes and the error reports `missing permission(s): write`.
+
+Help and shell completion are read-only display paths: the built-in `help`
+command, the `--help` flag, the hidden `__complete`/`__completeNoDesc`
+commands and the `completion` command tree never invoke the permission
+checker. In addition, the `help` path does not execute business run hooks
+inherited from ancestors. Shell completion remains compatible with inherited
+`PersistentPreRun` hooks. Custom commands can opt out of the permission check
+by setting `cobra.PermissionExemptAnnotation`; this exemption is not inherited
+by their sub-commands.
