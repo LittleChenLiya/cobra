@@ -257,6 +257,19 @@ type Command struct {
 	// SuggestionsMinimumDistance defines minimum levenshtein distance to display suggestions.
 	// Must be > 0.
 	SuggestionsMinimumDistance int
+
+	// readOnly indicates that this command is a throwaway view used for
+	// shell completion. Mutating methods (AddCommand, RemoveCommand,
+	// Execute, etc.) will panic to prevent completion callbacks from
+	// modifying the command tree or leaving state that would pollute a
+	// subsequent Execute.
+	readOnly bool
+
+	// flagOrigins maps cloned flags in a completion view to the original
+	// flags they were cloned from. It is used to look up flag completion
+	// functions, which are registered against the original flag pointers.
+	// This field is only set on read-only completion views.
+	flagOrigins map[*flag.Flag]*flag.Flag
 }
 
 // Context returns underlying command context. If command was executed
@@ -273,12 +286,14 @@ func (c *Command) Context() context.Context {
 // SetContext sets context for the command. This context will be overwritten by
 // Command.ExecuteContext or Command.ExecuteContextC.
 func (c *Command) SetContext(ctx context.Context) {
+	c.checkReadOnly()
 	c.ctx = ctx
 }
 
 // SetArgs sets arguments for the command. It is set to os.Args[1:] by default, if desired, can be overridden
 // particularly useful when testing.
 func (c *Command) SetArgs(a []string) {
+	c.checkReadOnly()
 	c.args = a
 }
 
@@ -287,6 +302,7 @@ func (c *Command) SetArgs(a []string) {
 //
 // Deprecated: Use SetOut and/or SetErr instead
 func (c *Command) SetOutput(output io.Writer) {
+	c.checkReadOnly()
 	c.outWriter = output
 	c.errWriter = output
 }
@@ -294,28 +310,33 @@ func (c *Command) SetOutput(output io.Writer) {
 // SetOut sets the destination for usage messages.
 // If newOut is nil, os.Stdout is used.
 func (c *Command) SetOut(newOut io.Writer) {
+	c.checkReadOnly()
 	c.outWriter = newOut
 }
 
 // SetErr sets the destination for error messages.
 // If newErr is nil, os.Stderr is used.
 func (c *Command) SetErr(newErr io.Writer) {
+	c.checkReadOnly()
 	c.errWriter = newErr
 }
 
 // SetIn sets the source for input data
 // If newIn is nil, os.Stdin is used.
 func (c *Command) SetIn(newIn io.Reader) {
+	c.checkReadOnly()
 	c.inReader = newIn
 }
 
 // SetUsageFunc sets usage function. Usage can be defined by application.
 func (c *Command) SetUsageFunc(f func(*Command) error) {
+	c.checkReadOnly()
 	c.usageFunc = f
 }
 
 // SetUsageTemplate sets usage template. Can be defined by Application.
 func (c *Command) SetUsageTemplate(s string) {
+	c.checkReadOnly()
 	if s == "" {
 		c.usageTemplate = nil
 		return
@@ -326,21 +347,25 @@ func (c *Command) SetUsageTemplate(s string) {
 // SetFlagErrorFunc sets a function to generate an error when flag parsing
 // fails.
 func (c *Command) SetFlagErrorFunc(f func(*Command, error) error) {
+	c.checkReadOnly()
 	c.flagErrorFunc = f
 }
 
 // SetHelpFunc sets help function. Can be defined by Application.
 func (c *Command) SetHelpFunc(f func(*Command, []string)) {
+	c.checkReadOnly()
 	c.helpFunc = f
 }
 
 // SetHelpCommand sets help command.
 func (c *Command) SetHelpCommand(cmd *Command) {
+	c.checkReadOnly()
 	c.helpCommand = cmd
 }
 
 // SetHelpCommandGroupID sets the group id of the help command.
 func (c *Command) SetHelpCommandGroupID(groupID string) {
+	c.checkReadOnly()
 	if c.helpCommand != nil {
 		c.helpCommand.GroupID = groupID
 	}
@@ -350,6 +375,7 @@ func (c *Command) SetHelpCommandGroupID(groupID string) {
 
 // SetCompletionCommandGroupID sets the group id of the completion command.
 func (c *Command) SetCompletionCommandGroupID(groupID string) {
+	c.checkReadOnly()
 	// completionCommandGroupID is used if no completion command is defined by the user
 	c.Root().completionCommandGroupID = groupID
 }
@@ -380,6 +406,7 @@ func (c *Command) SetErrPrefix(s string) {
 // SetGlobalNormalizationFunc sets a normalization function to all flag sets and also to child commands.
 // The user should not have a cyclic dependency on commands.
 func (c *Command) SetGlobalNormalizationFunc(n func(f *flag.FlagSet, name string) flag.NormalizedName) {
+	c.checkReadOnly()
 	c.Flags().SetNormalizeFunc(n)
 	c.PersistentFlags().SetNormalizeFunc(n)
 	c.globNormFunc = n
@@ -558,6 +585,20 @@ func (c *Command) FlagErrorFunc() (f func(*Command, error) error) {
 }
 
 const minUsagePadding = 25
+
+// errReadOnlyView is the panic message used when a mutating method is
+// called on a read-only completion view.
+const errReadOnlyView = "cobra: cannot modify a read-only completion view"
+
+// checkReadOnly panics if c is a read-only completion view.
+// It is used by mutating Command methods to prevent completion callbacks
+// from modifying the command tree or leaving state that would pollute a
+// subsequent Execute.
+func (c *Command) checkReadOnly() {
+	if c.readOnly {
+		panic(errReadOnlyView)
+	}
+}
 
 // UsagePadding return padding for the usage.
 func (c *Command) UsagePadding() int {
@@ -1082,6 +1123,7 @@ func (c *Command) ExecuteContextC(ctx context.Context) (*Command, error) {
 
 // ExecuteC executes the command.
 func (c *Command) ExecuteC() (cmd *Command, err error) {
+	c.checkReadOnly()
 	if c.ctx == nil {
 		c.ctx = context.Background()
 	}
@@ -1315,6 +1357,7 @@ Simply type ` + c.DisplayName() + ` help [path to command] for full details.`,
 
 // ResetCommands delete parent, subcommand and help command from c.
 func (c *Command) ResetCommands() {
+	c.checkReadOnly()
 	c.parent = nil
 	c.commands = nil
 	c.helpCommand = nil
@@ -1340,6 +1383,7 @@ func (c *Command) Commands() []*Command {
 
 // AddCommand adds one or more commands to this parent command.
 func (c *Command) AddCommand(cmds ...*Command) {
+	c.checkReadOnly()
 	for i, x := range cmds {
 		if cmds[i] == c {
 			panic("Command can't be a child of itself")
@@ -1394,11 +1438,13 @@ func (c *Command) ContainsGroup(groupID string) bool {
 
 // AddGroup adds one or more command groups to this parent command.
 func (c *Command) AddGroup(groups ...*Group) {
+	c.checkReadOnly()
 	c.commandgroups = append(c.commandgroups, groups...)
 }
 
 // RemoveCommand removes one or more commands from a parent command.
 func (c *Command) RemoveCommand(cmds ...*Command) {
+	c.checkReadOnly()
 	commands := []*Command{}
 main:
 	for _, command := range c.commands {
@@ -1785,6 +1831,7 @@ func (c *Command) PersistentFlags() *flag.FlagSet {
 
 // ResetFlags deletes all flags from command.
 func (c *Command) ResetFlags() {
+	c.checkReadOnly()
 	c.flagErrorBuf = new(bytes.Buffer)
 	c.flagErrorBuf.Reset()
 	c.flags = flag.NewFlagSet(c.DisplayName(), flag.ContinueOnError)

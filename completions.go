@@ -168,6 +168,7 @@ func FixedCompletions(choices []Completion, directive ShellCompDirective) Comple
 // You can use pre-defined completion functions such as [FixedCompletions] or [NoFileCompletions],
 // or you can define your own.
 func (c *Command) RegisterFlagCompletionFunc(flagName string, f CompletionFunc) error {
+	c.checkReadOnly()
 	flag := c.Flag(flagName)
 	if flag == nil {
 		return fmt.Errorf("RegisterFlagCompletionFunc: flag '%s' does not exist", flagName)
@@ -248,6 +249,12 @@ func (c *Command) initCompleteCmd(args []string) {
 				// 2- Even without completions, we need to print the directive
 			}
 
+			// If the context was canceled while completion was running,
+			// discard the results so that late candidates are not published.
+			if ctxErr := finalCmd.Context().Err(); ctxErr != nil {
+				return
+			}
+
 			noDescriptions := cmd.CalledAs() == ShellCompNoDescRequestCmd
 			if !noDescriptions {
 				if doDescriptions, err := strconv.ParseBool(getEnvConfig(cmd, configEnvVarSuffixDescriptions)); err == nil {
@@ -325,27 +332,25 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 	var finalCmd *Command
 	var finalArgs []string
 	var err error
+	// Build a read-only view of the command tree from the registered
+	// baseline. All parsing and completion logic operates on the view so
+	// that completing flags never mutates the original command tree or
+	// leaves flag.Changed state that would pollute a subsequent Execute.
+	rootView := c.Root().completionView()
 	// Find the real command for which completion must be performed
 	// check if we need to traverse here to parse local flags on parent commands
 	if c.Root().TraverseChildren {
-		finalCmd, finalArgs, err = c.Root().Traverse(trimmedArgs)
+		finalCmd, finalArgs, err = rootView.Traverse(trimmedArgs)
 	} else {
-		// For Root commands that don't specify any value for their Args fields, when we call
-		// Find(), if those Root commands don't have any sub-commands, they will accept arguments.
-		// However, because we have added the __complete sub-command in the current code path, the
-		// call to Find() -> legacyArgs() will return an error if there are any arguments.
-		// To avoid this, we first remove the __complete command to get back to having no sub-commands.
-		rootCmd := c.Root()
-		if len(rootCmd.Commands()) == 1 {
-			rootCmd.RemoveCommand(c)
-		}
-
-		finalCmd, finalArgs, err = rootCmd.Find(trimmedArgs)
+		finalCmd, finalArgs, err = rootView.Find(trimmedArgs)
 	}
 	if err != nil {
 		// Unable to find the real command. E.g., <program> someInvalidCmd <TAB>
 		return c, []Completion{}, ShellCompDirectiveDefault, fmt.Errorf("unable to find a command for arguments: %v", trimmedArgs)
 	}
+	// Propagate the context from the completion command to the view so that
+	// callbacks can observe cancellation and the framework can stop
+	// publishing results when the context is canceled.
 	finalCmd.ctx = c.ctx
 
 	// These flags are normally added when `execute()` is called on `finalCmd`,
@@ -568,16 +573,34 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 	var completionFn CompletionFunc
 	if flag != nil && flagCompletion {
 		flagCompletionMutex.RLock()
-		completionFn = flagCompletionFunctions[flag]
+		// The view's flags are clones of the originals; look up the
+		// original flag pointer to find the registered completion func.
+		lookupFlag := flag
+		if finalCmd.flagOrigins != nil {
+			if orig, ok := finalCmd.flagOrigins[flag]; ok {
+				lookupFlag = orig
+			}
+		}
+		completionFn = flagCompletionFunctions[lookupFlag]
 		flagCompletionMutex.RUnlock()
 	} else {
 		completionFn = finalCmd.ValidArgsFunction
 	}
 	if completionFn != nil {
+		// If the context was already canceled before invoking the callback,
+		// there is no point in running it.
+		if err := finalCmd.Context().Err(); err != nil {
+			return finalCmd, []Completion{}, ShellCompDirectiveNoFileComp, nil
+		}
 		// Go custom completion defined for this flag or command.
 		// Call the registered completion function to get the completions.
 		var comps []Completion
 		comps, directive = completionFn(finalCmd, finalArgs, toComplete)
+		// If the context was canceled while the callback was running,
+		// discard the results so that late candidates are not published.
+		if err := finalCmd.Context().Err(); err != nil {
+			return finalCmd, []Completion{}, ShellCompDirectiveNoFileComp, nil
+		}
 		completions = append(completions, comps...)
 	}
 

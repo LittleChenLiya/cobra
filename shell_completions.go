@@ -22,6 +22,7 @@ import (
 // prioritize the named flag when performing completion,
 // and causes your command to report an error if invoked without the flag.
 func (c *Command) MarkFlagRequired(name string) error {
+	c.checkReadOnly()
 	return MarkFlagRequired(c.Flags(), name)
 }
 
@@ -29,6 +30,7 @@ func (c *Command) MarkFlagRequired(name string) error {
 // prioritize the named persistent flag when performing completion,
 // and causes your command to report an error if invoked without the flag.
 func (c *Command) MarkPersistentFlagRequired(name string) error {
+	c.checkReadOnly()
 	return MarkFlagRequired(c.PersistentFlags(), name)
 }
 
@@ -42,6 +44,7 @@ func MarkFlagRequired(flags *pflag.FlagSet, name string) error {
 // MarkFlagFilename instructs the various shell completion implementations to
 // limit completions for the named flag to the specified file extensions.
 func (c *Command) MarkFlagFilename(name string, extensions ...string) error {
+	c.checkReadOnly()
 	return MarkFlagFilename(c.Flags(), name, extensions...)
 }
 
@@ -52,6 +55,7 @@ func (c *Command) MarkFlagFilename(name string, extensions ...string) error {
 // It is recommended to instead use c.RegisterFlagCompletionFunc(...) which allows
 // to register a Go function which will work across all shells.
 func (c *Command) MarkFlagCustom(name string, f string) error {
+	c.checkReadOnly()
 	return MarkFlagCustom(c.Flags(), name, f)
 }
 
@@ -59,6 +63,7 @@ func (c *Command) MarkFlagCustom(name string, f string) error {
 // implementations to limit completions for the named persistent flag to the
 // specified file extensions.
 func (c *Command) MarkPersistentFlagFilename(name string, extensions ...string) error {
+	c.checkReadOnly()
 	return MarkFlagFilename(c.PersistentFlags(), name, extensions...)
 }
 
@@ -81,6 +86,7 @@ func MarkFlagCustom(flags *pflag.FlagSet, name string, f string) error {
 // MarkFlagDirname instructs the various shell completion implementations to
 // limit completions for the named flag to directory names.
 func (c *Command) MarkFlagDirname(name string) error {
+	c.checkReadOnly()
 	return MarkFlagDirname(c.Flags(), name)
 }
 
@@ -88,6 +94,7 @@ func (c *Command) MarkFlagDirname(name string) error {
 // implementations to limit completions for the named persistent flag to
 // directory names.
 func (c *Command) MarkPersistentFlagDirname(name string) error {
+	c.checkReadOnly()
 	return MarkFlagDirname(c.PersistentFlags(), name)
 }
 

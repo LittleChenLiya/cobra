@@ -244,7 +244,7 @@ func (c *Command) enforceFlagGroupsForCompletion() {
 			if isSet {
 				// One of the flags of the group is set, mark the other ones as required
 				for _, fName := range strings.Split(flagList, " ") {
-					_ = c.MarkFlagRequired(fName)
+					_ = MarkFlagRequired(c.Flags(), fName)
 				}
 			}
 		}
@@ -265,7 +265,7 @@ func (c *Command) enforceFlagGroupsForCompletion() {
 		// as required
 		if !isSet {
 			for _, fName := range strings.Split(flagList, " ") {
-				_ = c.MarkFlagRequired(fName)
+				_ = MarkFlagRequired(c.Flags(), fName)
 			}
 		}
 	}

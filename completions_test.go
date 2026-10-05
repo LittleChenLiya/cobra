@@ -4127,3 +4127,247 @@ func TestCompletionDoesNotMutateOsArgs(t *testing.T) {
 		t.Errorf("os.Args[2] was mutated: expected %q, got %q", "x", os.Args[2])
 	}
 }
+
+// TestCompletionViewReadOnly verifies that attempting to modify a read-only
+// completion view panics. The view is constructed from the registered
+// baseline and must not be mutated during completion.
+func TestCompletionViewReadOnly(t *testing.T) {
+	rootCmd := &Command{
+		Use: "root",
+		Run: emptyRun,
+	}
+	childCmd := &Command{
+		Use: "child",
+		Run: emptyRun,
+	}
+	rootCmd.AddCommand(childCmd)
+
+	view := rootCmd.completionView()
+
+	// Attempting to add a command to the view must panic.
+	assertPanics(t, func() {
+		view.AddCommand(&Command{Use: "extra"})
+	})
+
+	// Attempting to remove a command from the view must panic.
+	assertPanics(t, func() {
+		view.RemoveCommand(childCmd)
+	})
+
+	// Attempting to set args on the view must panic.
+	assertPanics(t, func() {
+		view.SetArgs([]string{"arg1"})
+	})
+
+	// Attempting to set context on the view must panic.
+	assertPanics(t, func() {
+		view.SetContext(context.Background())
+	})
+
+	// Attempting to set output on the view must panic.
+	assertPanics(t, func() {
+		view.SetOut(&bytes.Buffer{})
+	})
+
+	// Attempting to mark a flag as required on the view must panic.
+	view.Flags().String("test", "", "test flag")
+	assertPanics(t, func() {
+		_ = view.MarkFlagRequired("test")
+	})
+}
+
+// assertPanics asserts that the given function panics.
+func assertPanics(t *testing.T, f func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("expected panic, but function did not panic")
+		}
+	}()
+	f()
+}
+
+// TestCompletionViewNoChangedPollution verifies that completing temporary
+// flags does not leave Changed state on the original command's flags.
+// After completion, a normal Execute should still use the original default
+// values.
+func TestCompletionViewNoChangedPollution(t *testing.T) {
+	rootCmd := &Command{
+		Use: "root",
+		Run: func(cmd *Command, args []string) {
+			// Verify the flag still has its default value after completion.
+			val, _ := cmd.Flags().GetString("temp")
+			if val != "default" {
+				t.Errorf("flag value was polluted: expected %q, got %q", "default", val)
+			}
+			changed := cmd.Flags().Changed("temp")
+			if changed {
+				t.Errorf("flag Changed state was polluted: expected false, got true")
+			}
+		},
+	}
+	rootCmd.Flags().String("temp", "default", "temporary flag for completion")
+	_ = rootCmd.RegisterFlagCompletionFunc("temp", func(cmd *Command, args []string, toComplete string) ([]string, ShellCompDirective) {
+		return []string{"val1", "val2"}, ShellCompDirectiveNoFileComp
+	})
+
+	// First, trigger completion which parses the temporary flag.
+	output, err := executeCommand(rootCmd, ShellCompNoDescRequestCmd, "--temp", "")
+	if err != nil {
+		t.Errorf("Unexpected error during completion: %v", err)
+	}
+	expected := strings.Join([]string{
+		"val1",
+		"val2",
+		":4",
+		"Completion ended with directive: ShellCompDirectiveNoFileComp", ""}, "\n")
+	if output != expected {
+		t.Errorf("expected: %q, got: %q", expected, output)
+	}
+
+	// Then, execute the command normally WITHOUT setting the flag.
+	// The flag should still have its default value and not be Changed.
+	_, err = executeCommand(rootCmd)
+	if err != nil {
+		t.Errorf("Unexpected error during normal execution: %v", err)
+	}
+}
+
+// TestCompletionViewContextCancellation verifies that late completion
+// candidates after context cancellation do not appear in the output.
+func TestCompletionViewContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	rootCmd := &Command{
+		Use: "root",
+		Run: emptyRun,
+	}
+	rootCmd.ValidArgsFunction = func(cmd *Command, args []string, toComplete string) ([]string, ShellCompDirective) {
+		// Cancel the context before returning candidates.
+		cancel()
+		// Simulate late candidates.
+		return []string{"late1", "late2"}, ShellCompDirectiveNoFileComp
+	}
+
+	output, err := executeCommandWithContext(ctx, rootCmd, ShellCompNoDescRequestCmd, "")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	// After cancellation, no candidates should be published. The completion
+	// command returns early without printing anything.
+	if output != "" {
+		t.Errorf("expected empty output after cancellation, got: %q", output)
+	}
+}
+
+// TestCompletionViewContextCancellationBeforeCallback verifies that when the
+// context is already canceled before the completion callback runs, the
+// callback is not invoked and no candidates are published.
+func TestCompletionViewContextCancellationBeforeCallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel before completion.
+
+	callbackInvoked := false
+	rootCmd := &Command{
+		Use: "root",
+		Run: emptyRun,
+	}
+	rootCmd.ValidArgsFunction = func(cmd *Command, args []string, toComplete string) ([]string, ShellCompDirective) {
+		callbackInvoked = true
+		return []string{"candidate1"}, ShellCompDirectiveNoFileComp
+	}
+
+	output, err := executeCommandWithContext(ctx, rootCmd, ShellCompNoDescRequestCmd, "")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if callbackInvoked {
+		t.Errorf("completion callback should not be invoked when context is canceled")
+	}
+
+	// After cancellation, no candidates should be published. The completion
+	// command returns early without printing anything.
+	if output != "" {
+		t.Errorf("expected empty output after cancellation, got: %q", output)
+	}
+}
+
+// TestCompletionViewAliases verifies that command aliases use the same
+// read-only view as the command itself. Completing via an alias should
+// behave identically to completing via the command name.
+func TestCompletionViewAliases(t *testing.T) {
+	rootCmd := &Command{
+		Use: "root",
+		Run: emptyRun,
+	}
+	childCmd := &Command{
+		Use:     "child",
+		Aliases: []string{"ch", "kid"},
+		Run:     emptyRun,
+		ValidArgsFunction: func(cmd *Command, args []string, toComplete string) ([]string, ShellCompDirective) {
+			return []string{"arg1", "arg2"}, ShellCompDirectiveNoFileComp
+		},
+	}
+	rootCmd.AddCommand(childCmd)
+
+	// Completing via the command name.
+	output1, err := executeCommand(rootCmd, ShellCompNoDescRequestCmd, "child", "")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	// Completing via an alias.
+	output2, err := executeCommand(rootCmd, ShellCompNoDescRequestCmd, "ch", "")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	// Both should produce the same output.
+	if output1 != output2 {
+		t.Errorf("alias completion differs: name=%q, alias=%q", output1, output2)
+	}
+
+	expected := strings.Join([]string{
+		"arg1",
+		"arg2",
+		":4",
+		"Completion ended with directive: ShellCompDirectiveNoFileComp", ""}, "\n")
+	if output1 != expected {
+		t.Errorf("expected: %q, got: %q", expected, output1)
+	}
+}
+
+// TestCompletionViewBusinessRunNotExecuted verifies that the business Run
+// function is not executed during completion. Only the completion callback
+// should be invoked.
+func TestCompletionViewBusinessRunNotExecuted(t *testing.T) {
+	runExecuted := false
+	rootCmd := &Command{
+		Use: "root",
+		Run: func(cmd *Command, args []string) {
+			runExecuted = true
+		},
+		ValidArgsFunction: func(cmd *Command, args []string, toComplete string) ([]string, ShellCompDirective) {
+			return []string{"comp1"}, ShellCompDirectiveNoFileComp
+		},
+	}
+
+	output, err := executeCommand(rootCmd, ShellCompNoDescRequestCmd, "")
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+
+	if runExecuted {
+		t.Errorf("business Run should not be executed during completion")
+	}
+
+	expected := strings.Join([]string{
+		"comp1",
+		":4",
+		"Completion ended with directive: ShellCompDirectiveNoFileComp", ""}, "\n")
+	if output != expected {
+		t.Errorf("expected: %q, got: %q", expected, output)
+	}
+}
