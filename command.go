@@ -164,6 +164,13 @@ type Command struct {
 	iflags *flag.FlagSet
 	// parentsPflags is all persistent flags of cmd's parents.
 	parentsPflags *flag.FlagSet
+	// flagMigrations is the explicit table mapping deprecated flag names to
+	// their canonical names. A nil value means the table is inherited from the
+	// nearest ancestor that set one.
+	flagMigrations []FlagMigration
+	// flagMigrationsSet reports whether this command set its own migration
+	// table (possibly empty). It distinguishes "not set" from "set to empty".
+	flagMigrationsSet bool
 	// globNormFunc is the global normalization function
 	// that we can use on every pflag set and children commands
 	globNormFunc func(f *flag.FlagSet, name string) flag.NormalizedName
@@ -1879,7 +1886,13 @@ func (c *Command) ParseFlags(args []string) error {
 	// do it here after merging all flags and just before parse
 	c.Flags().ParseErrorsAllowlist = flag.ParseErrorsAllowlist(c.FParseErrWhitelist)
 
-	err := c.Flags().Parse(args)
+	var err error
+	args, err = c.applyFlagMigrations(args)
+	if err != nil {
+		return err
+	}
+
+	err = c.Flags().Parse(args)
 	// Print warnings if they occurred (e.g. deprecated flag messages).
 	if c.flagErrorBuf.Len()-beforeErrorBufLen > 0 && err == nil {
 		c.Print(c.flagErrorBuf.String())

@@ -433,6 +433,40 @@ Usage examples:
 
 **Note**: Both `CountVar` and array flags leverage the underlying [pflag](https://github.com/spf13/pflag) library's support for repeated flags.
 
+### Flag Migrations
+
+When renaming or replacing a flag, you can provide an explicit migration table so that the deprecated flag name keeps working while transparently mapping to the canonical flag. This avoids breaking existing users of the old name.
+
+```go
+var newFlag string
+
+func init() {
+  rootCmd.PersistentFlags().StringVar(&newFlag, "new-flag", "", "new flag name")
+  rootCmd.SetFlagMigrations(
+    cobra.FlagMigration{Old: "old-flag", New: "new-flag"},
+  )
+}
+```
+
+With this table, `--old-flag=value` is equivalent to `--new-flag=value`: the value is set on the canonical flag and the canonical flag's `Changed` field is true. A deprecation warning is printed once per deprecated flag that is used.
+
+The migration table is inherited by subcommands. A subcommand can override the table by setting its own, or clear it by calling `SetFlagMigrations` with no arguments.
+
+Migrations are applied per selected command based on that command's effective flag set:
+
+- The canonical flag must exist for the selected command (as a local flag or an inherited persistent flag).
+- The deprecated name must not itself be registered as a flag.
+- A subcommand's local flag with the same name as a parent persistent flag correctly shadows the parent; the migration targets the flag the selected command actually sees.
+
+If both the deprecated name and its canonical name are provided on the command line, execution is rejected with an error before `PreRun` runs, instead of letting the last value win:
+
+```bash
+$ myapp --old-flag=old --new-flag=new
+Error: flag --old-flag and flag --new-flag cannot be used together; use --new-flag instead
+```
+
+Flags that are not part of the migration table are left unchanged.
+
 ## Positional and Custom Arguments
 
 Validation of positional arguments can be specified using the `Args` field of `Command`.
