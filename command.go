@@ -89,6 +89,16 @@ type Command struct {
 	// Only one of ValidArgs and ValidArgsFunction can be used for a command.
 	ValidArgsFunction CompletionFunc
 
+	// ValidArgsViewFunction is an optional function that provides valid non-flag
+	// arguments for shell completion, like ValidArgsFunction, but it receives a
+	// read-only CompletionView built from the registered baseline of the command
+	// tree instead of the mutable *Command.  The view exposes the parsed
+	// arguments and the effective flags, rejects any modification, and never
+	// leaves completion-time flag state behind for the next Execute.
+	// If both ValidArgsFunction and ValidArgsViewFunction are set,
+	// ValidArgsViewFunction takes precedence.
+	ValidArgsViewFunction CompletionViewFunc
+
 	// Expected arguments
 	Args PositionalArgs
 

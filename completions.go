@@ -248,6 +248,14 @@ func (c *Command) initCompleteCmd(args []string) {
 				// 2- Even without completions, we need to print the directive
 			}
 
+			// If the context was cancelled, stop publishing completion
+			// results: late candidates must not reach the shell.  The
+			// directive is still printed so that completion scripts do not
+			// wait forever for the final marker.
+			if ctx := cmd.Context(); ctx != nil && ctx.Err() != nil {
+				completions = nil
+			}
+
 			noDescriptions := cmd.CalledAs() == ShellCompNoDescRequestCmd
 			if !noDescriptions {
 				if doDescriptions, err := strconv.ParseBool(getEnvConfig(cmd, configEnvVarSuffixDescriptions)); err == nil {
@@ -314,6 +322,16 @@ type SliceValue interface {
 }
 
 func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCompDirective, error) {
+	// Build the completion view from the registered baseline: snapshot the
+	// state of every flag in the command tree so that any parsing done for
+	// completion (including temporary flags on the command-line being
+	// completed) is rolled back when completion ends, whether it ends
+	// normally or with an error.  This guarantees that a later Execute()
+	// still sees the original default values and no leftover Changed state.
+	flagBaseline := map[*pflag.Flag]*completionFlagState{}
+	snapshotCompletionFlags(c.Root(), flagBaseline)
+	defer restoreCompletionFlags(flagBaseline)
+
 	// The last argument, which is not completely typed by the user,
 	// should not be part of the list of arguments
 	toComplete := args[len(args)-1]
@@ -356,6 +374,9 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 	if !finalCmd.DisableFlagParsing {
 		finalCmd.InitDefaultHelpFlag()
 		finalCmd.InitDefaultVersionFlag()
+		// Extend the baseline with the flags that were just added, so that
+		// parsing them during completion does not leak either.
+		snapshotCompletionFlags(finalCmd, flagBaseline)
 	}
 
 	// Check if we are doing flag value completion before parsing the flags.
@@ -566,14 +587,25 @@ func (c *Command) getCompletions(args []string) (*Command, []Completion, ShellCo
 
 	// Find the completion function for the flag or command
 	var completionFn CompletionFunc
+	var viewFn CompletionViewFunc
 	if flag != nil && flagCompletion {
 		flagCompletionMutex.RLock()
 		completionFn = flagCompletionFunctions[flag]
+		viewFn = flagCompletionViewFunctions[flag]
 		flagCompletionMutex.RUnlock()
 	} else {
 		completionFn = finalCmd.ValidArgsFunction
+		viewFn = finalCmd.ValidArgsViewFunction
 	}
-	if completionFn != nil {
+	switch {
+	case viewFn != nil:
+		// A read-only view callback takes precedence over the legacy callback.
+		// The view exposes the parsed arguments and effective flags without
+		// handing out the mutable command tree.
+		var comps []Completion
+		comps, directive = viewFn(newCompletionView(finalCmd, finalArgs, toComplete))
+		completions = append(completions, comps...)
+	case completionFn != nil:
 		// Go custom completion defined for this flag or command.
 		// Call the registered completion function to get the completions.
 		var comps []Completion
