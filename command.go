@@ -164,6 +164,17 @@ type Command struct {
 	iflags *flag.FlagSet
 	// parentsPflags is all persistent flags of cmd's parents.
 	parentsPflags *flag.FlagSet
+	// flagMigrations maps deprecated flag names to canonical flag names for
+	// this command; see SetFlagMigrations.
+	flagMigrations map[string]string
+	// migrationWarned keeps track of deprecated flag names for which a
+	// migration warning has already been printed, so each warning fires once.
+	migrationWarned map[string]bool
+	// migrationUsage records which source (deprecated name, or "" for the
+	// canonical name) set each canonical flag during this command's pre-parse
+	// pass. It lets commands deeper in the tree (with TraverseChildren) detect
+	// conflicts that span parent and child parses.
+	migrationUsage map[string]string
 	// globNormFunc is the global normalization function
 	// that we can use on every pflag set and children commands
 	globNormFunc func(f *flag.FlagSet, name string) flag.NormalizedName
@@ -1879,8 +1890,17 @@ func (c *Command) ParseFlags(args []string) error {
 	// do it here after merging all flags and just before parse
 	c.Flags().ParseErrorsAllowlist = flag.ParseErrorsAllowlist(c.FParseErrWhitelist)
 
-	err := c.Flags().Parse(args)
-	// Print warnings if they occurred (e.g. deprecated flag messages).
+	// Resolve explicit flag migrations (e.g. deprecated --old -> --new) before
+	// parsing so that conflicts are reported up front and before any PreRun
+	// hook runs, while the canonical flag owns the parsed value and Changed.
+	migratedArgs, migrationErr := c.applyFlagMigrations(args)
+	if migrationErr != nil {
+		return migrationErr
+	}
+
+	err := c.Flags().Parse(migratedArgs)
+	// Print warnings if they occurred (e.g. deprecated or migrated flag
+	// messages).
 	if c.flagErrorBuf.Len()-beforeErrorBufLen > 0 && err == nil {
 		c.Print(c.flagErrorBuf.String())
 	}

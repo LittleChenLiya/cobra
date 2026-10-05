@@ -433,6 +433,59 @@ Usage examples:
 
 **Note**: Both `CountVar` and array flags leverage the underlying [pflag](https://github.com/spf13/pflag) library's support for repeated flags.
 
+### Migrating (Renaming) Flags
+
+When you rename a flag, you can keep accepting the old name with an explicit
+**flag migration table**. A migration maps one or more deprecated flag names to
+a single canonical flag name:
+
+```go
+rootCmd.Flags().String("new", "", "the canonical flag")
+
+// --old is a deprecated alias for --new.
+rootCmd.SetFlagMigrations(map[string]string{
+    "old": "new",
+})
+
+// Several deprecated names may map to the same canonical flag.
+rootCmd.AddFlagMigration("legacy", "new")
+```
+
+With the table above, `myapp --old value` behaves exactly like
+`myapp --new value`: the value lands on the canonical flag, and only the
+canonical flag is reported as `Changed` (`cmd.Flags().Changed("new")` is
+`true`, `cmd.Flags().Changed("old")` is always `false`). The originally
+registered flag tree is never modified; the old name is translated while
+arguments are parsed.
+
+The migration rules are:
+
+- **Value correctness**: `--old value` and `--old=value` set the canonical flag
+  to `value`, respecting whether the canonical flag takes a value or is a
+  boolean-like flag.
+- **No silent override**: providing both the deprecated and the canonical name
+  in one invocation (`--old a --new b`), or two deprecated names that map to
+  the same canonical flag, returns an error. The last value does not win. The
+  conflict is detected during flag parsing, before any `PersistentPreRun` or
+  `PreRun` hook runs.
+- **One warning**: the first use of a deprecated name prints
+  `Flag --old has been deprecated, use --new instead` exactly once per run;
+  further uses stay silent.
+- **Effective flag set / shadowing**: the table is interpreted against the
+  flags of the command that actually runs. A migration registered on a parent
+  for a persistent flag applies to subcommands, but a subcommand local flag
+  with the same name as the deprecated name shadows it and is **not**
+  redirected to the parent flag.
+- **Opt-in**: commands that never call `SetFlagMigrations` (or
+  `AddFlagMigration`) are completely unaffected; an unregistered `--old` is
+  treated like any other unknown flag.
+
+You can exercise the migration behavior with the focused test suite:
+
+```sh
+go test -v -run 'FlagMigration|DeprecatedAliases|ChildLocalFlag|ParentPersistent|AddFlagMigration' .
+```
+
 ## Positional and Custom Arguments
 
 Validation of positional arguments can be specified using the `Args` field of `Command`.
