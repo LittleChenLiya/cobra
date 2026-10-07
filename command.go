@@ -164,6 +164,11 @@ type Command struct {
 	iflags *flag.FlagSet
 	// parentsPflags is all persistent flags of cmd's parents.
 	parentsPflags *flag.FlagSet
+	// parseSessionTemplates holds deep copies of flag values captured the first
+	// time a parse session touches each flag. It is only used on the root
+	// command and shared by all parse sessions of the command tree, so that
+	// every session (including nested ones) starts from the same baseline.
+	parseSessionTemplates map[*flag.Flag]flag.Value
 	// globNormFunc is the global normalization function
 	// that we can use on every pflag set and children commands
 	globNormFunc func(f *flag.FlagSet, name string) flag.NormalizedName
